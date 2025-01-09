@@ -1,12 +1,12 @@
+mod context;
+mod egui_test;
+
 use context::{VulkanoConfig, VulkanoContext};
 use image::{ImageBuffer, Rgba};
 use vulkano::{
     pipeline::Pipeline,
     sync::{self, GpuFuture},
 };
-
-mod context;
-mod egui_test;
 
 // Shader module
 mod cs {
