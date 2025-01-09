@@ -1,11 +1,6 @@
-use std::sync::Arc;
-
 use image::{ImageBuffer, Rgba};
 use vulkano::{
-    command_buffer::{
-        AutoCommandBufferBuilder, ClearColorImageInfo, CommandBufferUsage, CopyImageToBufferInfo,
-    },
-    format::ClearColorValue,
+    pipeline::Pipeline,
     sync::{self, GpuFuture},
 };
 
@@ -16,15 +11,29 @@ mod cs {
         src: r"
             #version 460
 
-            layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
+            layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
 
-            layout(set = 0, binding = 0) buffer Data {
-                uint data[];
-            } buf;
+            layout(set = 0, binding = 0, rgba8) uniform writeonly image2D img;
 
             void main() {
-                uint idx = gl_GlobalInvocationID.x;
-                buf.data[idx] *= 12;
+                vec2 norm_coordinates = (gl_GlobalInvocationID.xy + vec2(0.5)) / vec2(imageSize(img));
+                vec2 c = (norm_coordinates - vec2(0.5)) * 2.0 - vec2(1.0, 0.0);
+
+                vec2 z = vec2(0.0, 0.0);
+                float i;
+                for (i = 0.0; i < 1.0; i += 0.005) {
+                    z = vec2(
+                        z.x * z.x - z.y * z.y + c.x,
+                        z.y * z.x + z.x * z.y + c.y
+                    );
+
+                    if (length(z) > 4.0) {
+                        break;
+                    }
+                }
+
+                vec4 to_write = vec4(vec3(i), 1.0);
+                imageStore(img, ivec2(gl_GlobalInvocationID.xy), to_write);
             }
         ",
     }
@@ -78,7 +87,7 @@ mod physical_device_selection {
         let device_local_memory_heaps: HashSet<u32> = memory_properties
             .memory_types
             .iter()
-            .filter(|memory_type| {
+            .filter(|&memory_type| {
                 memory_type
                     .property_flags
                     .contains(vulkano::memory::MemoryPropertyFlags::DEVICE_LOCAL)
@@ -90,7 +99,7 @@ mod physical_device_selection {
             .memory_heaps
             .iter()
             .enumerate()
-            .filter(|(i, _)| device_local_memory_heaps.contains(&(*i as u32)))
+            .filter(|&(i, _)| device_local_memory_heaps.contains(&(i as u32)))
             .map(|(_, heap)| heap.size)
             .sum()
     }
@@ -246,37 +255,40 @@ mod pipeline_setup {
     }
 }
 
-// Descriptor Set Creation
-mod descriptor_set_creation {
+mod descriptor_set_util {
     use std::sync::Arc;
     use vulkano::{
-        buffer::Subbuffer,
         descriptor_set::{
             allocator::StandardDescriptorSetAllocator, PersistentDescriptorSet, WriteDescriptorSet,
         },
         device::Device,
+        image::{view::ImageView, Image},
         pipeline::PipelineLayout,
     };
+
+    fn get_descriptor_set_allocator(device: &Arc<Device>) -> StandardDescriptorSetAllocator {
+        StandardDescriptorSetAllocator::new(device.clone(), Default::default())
+    }
 
     pub fn create_descriptor_set(
         device: &Arc<Device>,
         pipeline_layout: &Arc<PipelineLayout>,
-        data_buffer: &Subbuffer<[u8]>,
+        image: Arc<Image>,
     ) -> Arc<PersistentDescriptorSet> {
-        // Setup Descriptor Set Allocator
-        let descriptor_set_allocator =
-            StandardDescriptorSetAllocator::new(device.clone(), Default::default());
+        let descriptor_set_allocator = get_descriptor_set_allocator(device);
 
-        let descripter_set_layout_index = 0;
+        let view = ImageView::new_default(image.clone()).expect("Failed to create image view");
+
+        let set_idx = 0;
         let descriptor_set_layout = pipeline_layout
             .set_layouts()
-            .get(descripter_set_layout_index)
-            .unwrap()
-            .clone();
+            .get(set_idx)
+            .expect("Failed to get descriptor set layout");
+
         PersistentDescriptorSet::new(
             &descriptor_set_allocator,
-            descriptor_set_layout,
-            [WriteDescriptorSet::buffer(0, data_buffer.clone())], // 0 is the binding
+            descriptor_set_layout.clone(), // MMM test this
+            [WriteDescriptorSet::image_view(0, view.clone())], // 0 is the binding
             [],
         )
         .expect("Failed to create descriptor set")
@@ -287,10 +299,16 @@ mod descriptor_set_creation {
 mod commands {
     use std::sync::Arc;
     use vulkano::{
-        command_buffer::allocator::{
-            StandardCommandBufferAllocator, StandardCommandBufferAllocatorCreateInfo,
+        buffer::Subbuffer,
+        command_buffer::{
+            allocator::{StandardCommandBufferAllocator, StandardCommandBufferAllocatorCreateInfo},
+            AutoCommandBufferBuilder, CommandBufferUsage, CopyImageToBufferInfo,
+            PrimaryAutoCommandBuffer,
         },
-        device::Device,
+        descriptor_set::PersistentDescriptorSet,
+        device::{Device, Queue},
+        image::Image,
+        pipeline::{ComputePipeline, Pipeline, PipelineBindPoint},
     };
 
     pub fn create_command_buffer_allocator(device: &Arc<Device>) -> StandardCommandBufferAllocator {
@@ -299,14 +317,47 @@ mod commands {
             StandardCommandBufferAllocatorCreateInfo::default(),
         )
     }
+
+    pub fn create_command_buffer(
+        command_buffer_allocator: &StandardCommandBufferAllocator,
+        queue: &Arc<Queue>,
+        compute_pipeline: &Arc<ComputePipeline>,
+        descriptor_set: &Arc<PersistentDescriptorSet>,
+        image: &Arc<Image>,
+        buffer: &Subbuffer<[u8]>,
+    ) -> Arc<PrimaryAutoCommandBuffer> {
+        let mut builder = AutoCommandBufferBuilder::primary(
+            command_buffer_allocator,
+            queue.queue_family_index(),
+            CommandBufferUsage::OneTimeSubmit,
+        )
+        .expect("Failed to create command buffer builder");
+
+        builder
+            .bind_pipeline_compute(compute_pipeline.clone())
+            .unwrap()
+            .bind_descriptor_sets(
+                PipelineBindPoint::Compute,
+                compute_pipeline.layout().clone(),
+                0,
+                descriptor_set.clone(),
+            )
+            .unwrap()
+            .dispatch([1024 / 8, 1024 / 8, 1])
+            .unwrap()
+            .copy_image_to_buffer(CopyImageToBufferInfo::image_buffer(
+                image.clone(),
+                buffer.clone(),
+            ))
+            .unwrap();
+
+        builder.build().unwrap()
+    }
 }
 
 mod image_util {
     use std::sync::Arc;
-    use vulkano::command_buffer::allocator::StandardCommandBufferAllocator;
     use vulkano::{
-        command_buffer::{AutoCommandBufferBuilder, ClearColorImageInfo, CommandBufferUsage},
-        format::ClearColorValue,
         image::Image,
         memory::allocator::{AllocationCreateInfo, MemoryTypeFilter, StandardMemoryAllocator},
     };
@@ -321,7 +372,7 @@ mod image_util {
                 image_type: ImageType::Dim2d,
                 format: Format::R8G8B8A8_UNORM,
                 extent: [1024, 1024, 1],
-                usage: ImageUsage::TRANSFER_DST | ImageUsage::TRANSFER_SRC,
+                usage: ImageUsage::STORAGE | ImageUsage::TRANSFER_SRC,
                 ..Default::default()
             },
             AllocationCreateInfo {
@@ -331,31 +382,8 @@ mod image_util {
         )
         .expect("Failed to create image")
     }
-
-    // pub fn clear_image(
-    //     command_buffer_allocator: &StandardCommandBufferAllocator,
-    //     queue: &Arc<vulkano::device::Queue>,
-    //     image: &Arc<Image>,
-    // ) {
-    //     let mut builder = AutoCommandBufferBuilder::primary(
-    //         command_buffer_allocator,
-    //         queue.queue_family_index(),
-    //         CommandBufferUsage::OneTimeSubmit,
-    //     )
-    //     .unwrap();
-
-    //     builder
-    //         .clear_color_image(ClearColorImageInfo {
-    //             clear_value: ClearColorValue::Float([0.0, 0.0, 1.0, 1.0]),
-    //             ..ClearColorImageInfo::image(image.clone())
-    //         })
-    //         .unwrap();
-
-    //     let command_buffer = builder.build().expect("Failed to build command buffer");
-    // }
 }
 
-// Main Function
 fn main() {
     let lib = vulkan_setup::load_vulkan_library();
     let instance = instance::create_instance(lib);
@@ -368,26 +396,21 @@ fn main() {
     let image = image_util::create_image(&memory_allocator);
     let image_buffer = buffer::create_image_buffer(&memory_allocator);
 
-    let mut builder = AutoCommandBufferBuilder::primary(
+    let compute_pipeline = pipeline_setup::create_compute_pipeline(&device);
+    let descriptor_set = descriptor_set_util::create_descriptor_set(
+        &device,
+        &compute_pipeline.layout(),
+        image.clone(),
+    );
+
+    let command_buffer = commands::create_command_buffer(
         &command_buffer_allocator,
-        queue.queue_family_index(),
-        CommandBufferUsage::OneTimeSubmit,
-    )
-    .expect("Failed to create command buffer builder");
-
-    builder
-        .clear_color_image(ClearColorImageInfo {
-            clear_value: ClearColorValue::Float([0.0, 0.0, 1.0, 1.0]),
-            ..ClearColorImageInfo::image(image.clone())
-        })
-        .unwrap()
-        .copy_image_to_buffer(CopyImageToBufferInfo::image_buffer(
-            image.clone(),
-            image_buffer.clone(), // TODO: how can clone be made to a subbuffer?
-        ))
-        .unwrap();
-
-    let command_buffer = builder.build().expect("Failed to build command buffer");
+        &queue,
+        &compute_pipeline,
+        &descriptor_set,
+        &image,
+        &image_buffer,
+    );
 
     let future = sync::now(device.clone())
         .then_execute(queue.clone(), command_buffer)
