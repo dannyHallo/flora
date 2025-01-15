@@ -1,4 +1,4 @@
-use egui::{ScrollArea, TextEdit, TextStyle};
+use egui::{RichText, ScrollArea, TextEdit, TextStyle};
 use egui_winit_vulkano::{Gui, GuiConfig};
 use vulkano_util::{
     context::{VulkanoConfig, VulkanoContext},
@@ -10,7 +10,7 @@ use winit::{
 };
 
 fn sized_text(ui: &mut egui::Ui, text: impl Into<String>, size: f32) {
-    ui.label(egui::RichText::new(text).size(size));
+    ui.label(RichText::new(text).size(size));
 }
 
 pub fn main() {
@@ -24,16 +24,14 @@ pub fn main() {
     });
 
     // Create gui as main render pass (no overlay means it clears the image each frame)
-    let mut gui = {
-        let renderer = windows.get_primary_renderer_mut().unwrap();
-        Gui::new(
-            &event_loop,
-            renderer.surface(),
-            renderer.graphics_queue(),
-            renderer.swapchain_format(),
-            GuiConfig::default(),
-        )
-    };
+    let renderer = windows.get_primary_renderer_mut().unwrap();
+    let mut gui = Gui::new(
+        &event_loop,
+        renderer.surface(),
+        renderer.graphics_queue(),
+        renderer.swapchain_format(),
+        GuiConfig::default(),
+    );
 
     // Create gui state (pass anything your state requires)
     let mut code = CODE.to_owned();
