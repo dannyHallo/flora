@@ -12,6 +12,7 @@ egui = "0.24"
 egui_demo_lib = "0.24"
 vulkano-util = "0.34"
 winit = { version = "0.28", default-features = false }
+ahash = "0.8.11"
 
 [profile.dev]
 opt-level = 1

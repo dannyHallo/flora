@@ -1,8 +1,14 @@
-mod context;
+pub mod util {
+    pub mod context;
+    pub mod renderer;
+    pub mod window;
+}
+
 mod egui_test;
 
-use context::{VulkanoConfig, VulkanoContext};
 use image::{ImageBuffer, Rgba};
+use util::context::{VulkanoConfig, VulkanoContext};
+
 use vulkano::{
     pipeline::Pipeline,
     sync::{self, GpuFuture},
@@ -231,9 +237,12 @@ mod image_util {
 }
 
 fn main() {
-    let context = VulkanoContext::new(VulkanoConfig {
-        name: "Flora".into(),
-    });
+    let context = VulkanoContext::new(
+        VulkanoConfig {
+            name: "Flora".into(),
+        },
+        None,
+    );
 
     let command_buffer_allocator = commands::create_command_buffer_allocator(context.device());
 

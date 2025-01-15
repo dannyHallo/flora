@@ -700,6 +700,7 @@ dependencies = [
 name = "flora"
 version = "0.1.0"
 dependencies = [
+ "ahash",
  "egui",
  "egui_demo_lib",
  "egui_winit_vulkano",
